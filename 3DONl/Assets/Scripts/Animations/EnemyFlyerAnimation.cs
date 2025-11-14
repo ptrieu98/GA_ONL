@@ -1,18 +1,20 @@
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
+using Photon.Pun; // <-- PHOTON: Thêm vào
 
 public class EnemyFlyerAnimation : MonoBehaviour
 {
     
     [SerializeField] FlyingEnemy enemy;
-    [SerializeField] GameObject projectile;
-    [SerializeField] GameObject projectileSpawnPoint;
+    [SerializeField] GameObject projectile; // (Biến này không còn cần thiết)
+    [SerializeField] GameObject projectileSpawnPoint; // (Biến này không còn cần thiết)
     [SerializeField] AudioSource FlapSFX;
     [SerializeField] AudioSource SpewSFX;
     [SerializeField] AudioSource DeathSFX;
 
     Animator animator;
+    private PhotonView photonView; // <-- PHOTON: Thêm vào
 
     int state;
     bool attacking = false;
@@ -20,9 +22,11 @@ public class EnemyFlyerAnimation : MonoBehaviour
     
     void Start(){
         animator = GetComponent<Animator>();
+        photonView = enemy.GetComponent<PhotonView>(); // <-- PHOTON: Thêm vào
     }
 
     void LateUpdate() {
+        // Code logic Animator của bạn giữ nguyên
         if (enemy.state == Enemy.STATE.DEAD || enemy.currentHealth <= 0){
             animator.SetInteger("State", 2);
 
@@ -39,17 +43,22 @@ public class EnemyFlyerAnimation : MonoBehaviour
     }
 
     public void AttackKeyFrame(){
-        var inst = Instantiate(projectile);
-        inst.transform.parent = null;
-        inst.transform.position = projectileSpawnPoint.transform.position;
-        enemy.DealDamage(inst);
+        // <-- PHOTON: SỬA LỖI
+        // Không tự tạo đạn (Instantiate) ở đây
+        // Chỉ cần gọi hàm FireProjectile() từ script chính
+        enemy.FireProjectile();
     }
 
     public void EndAttackKeyFrame(){
         SpewSFX.pitch = Random.Range(0.9f, 1.1f);
         SpewSFX.Play();
         attacking = false;
-        enemy.state = Enemy.STATE.AGRO_OIL;
+        
+        // <-- PHOTON: Chỉ Master Client mới có quyền đổi state
+        if (photonView.IsMine) 
+        {
+            enemy.state = Enemy.STATE.AGRO_OIL;
+        }
     }
 
     public void Flap(){
@@ -60,6 +69,12 @@ public class EnemyFlyerAnimation : MonoBehaviour
     public void Disapear(){
         LevelManager levelManager = GameObject.FindObjectOfType<LevelManager>();
         if (levelManager != null) levelManager.EnemyKilled();
-        Destroy(enemy.gameObject);
+        
+        // <-- PHOTON: SỬA LỖI
+        // Chỉ Master Client (chủ sở hữu) mới có quyền hủy đối tượng
+        if (photonView.IsMine)
+        {
+            PhotonNetwork.Destroy(enemy.gameObject);
+        }
     }
 }

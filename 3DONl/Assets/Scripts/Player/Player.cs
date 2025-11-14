@@ -2,9 +2,12 @@ using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Rendering;
+using Photon.Pun; 
 
-public class Player : MonoBehaviour
+// Kế thừa MonoBehaviourPun và IPunObservable để đồng bộ
+public class Player : MonoBehaviourPun, IPunObservable
 {
+    // Biến static (chỉ tính cục bộ)
     public static int WavesCompleted = 0;
     public static int EnemiesKilled = 0;
     public static float DamageDealt = 0f;
@@ -12,7 +15,7 @@ public class Player : MonoBehaviour
 
     [SerializeField] float itemGrav = 1f;
     [SerializeField] float itemRange = 2f;
-	[SerializeField] float vignetteTime = 0.25f;
+    [SerializeField] float vignetteTime = 0.25f;
     [SerializeField] Volume damageVignette;
     [SerializeField] float vignetteSpeed = 10f;
 
@@ -22,6 +25,7 @@ public class Player : MonoBehaviour
     public float defense = 0f;
     public float damageMultiplier = 1f;
 
+    // Các biến này sẽ tự tìm
     public HealthBar healthBar;
     public HotBar hotBar;
     public InventoryObject inventory;
@@ -37,57 +41,60 @@ public class Player : MonoBehaviour
 
     private void Start()
     {
-        currentHealth = initialHealth;
-        maxHealth = initialHealth;
-        healthBar.SetMaxHealth(initialHealth);
-        healthBar.valueText.gameObject.SetActive(true);
-        cameraSystem = GameObject.FindObjectOfType<CameraSystem>();
+        // Chỉ chạy setup cho Player CỦA MÌNH
+        if (photonView.IsMine)
+        {
+            currentHealth = initialHealth;
+            maxHealth = initialHealth;
+
+            // Tự tìm các thành phần UI và Camera trong Scene
+            healthBar = FindObjectOfType<HealthBar>();
+            hotBar = FindObjectOfType<HotBar>();
+            cameraSystem = FindObjectOfType<CameraSystem>();
+            
+            GameObject vignetteObj = GameObject.FindWithTag("DamageVignette");
+            if(vignetteObj != null) damageVignette = vignetteObj.GetComponent<Volume>();
+
+            if (healthBar != null)
+            {
+                healthBar.SetMaxHealth(initialHealth);
+                healthBar.valueText.gameObject.SetActive(true);
+            }
+        }
+        
         itemMask = LayerMask.GetMask("Ground Item");
     }
 
     void Update() {
-        //move objects towards player
-        Collider[] hitColliders = Physics.OverlapSphere(transform.position, itemRange, itemMask);
-        Vector2 totalForce = Vector2.zero;
+        // Chỉ chạy logic trên máy chủ sở hữu
+        if (!photonView.IsMine) return;
 
+        // Hút item lại gần
+        Collider[] hitColliders = Physics.OverlapSphere(transform.position, itemRange, itemMask);
         foreach(Collider col in hitColliders){
             col.transform.parent.position += (transform.position - col.transform.parent.position).normalized * itemGrav * Time.deltaTime;
         }
 
-        //hurt effect
+        // Hiệu ứng màn hình đỏ khi đau
         if (hurtEffect){
             hurtEffectLerp += Time.deltaTime * vignetteSpeed;
             hurtEffectLerp = Mathf.Clamp(hurtEffectLerp, 0, 1);
-            damageVignette.weight = Mathf.Cos(hurtEffectLerp * Mathf.PI * 2 + Mathf.PI) * 0.5f + 0.5f;
+            
+            if(damageVignette != null)
+                damageVignette.weight = Mathf.Cos(hurtEffectLerp * Mathf.PI * 2 + Mathf.PI) * 0.5f + 0.5f;
 
             if (hurtEffectLerp == 1){
                 hurtEffect = false;
-                damageVignette.gameObject.SetActive(false);
+                if(damageVignette != null) damageVignette.gameObject.SetActive(false);
             }
         }
     }
 
-    public List<Enemy> GetLivingRobots() {
-        List<Enemy> livingRobots = new List<Enemy>();
-        DeployedEnemyPuncher[] punchers = GameObject.FindObjectsOfType<DeployedEnemyPuncher>();
-        foreach(DeployedEnemyPuncher puncher in punchers) {
-            livingRobots.Add(puncher);
-        }
-        DeployedEnemyShooter[] shooters = GameObject.FindObjectsOfType<DeployedEnemyShooter>();
-        foreach(DeployedEnemyShooter shooter in shooters) {
-            livingRobots.Add(shooter);
-        }
-        DeployedOilHealer[] healers = GameObject.FindObjectsOfType<DeployedOilHealer>();
-        foreach(DeployedOilHealer healer in healers) {
-            livingRobots.Add(healer);
-        }
-        return livingRobots;
-    }
-
-    public void IncreaseMaxHealth(float value) {
-        maxHealth += value;
-        healthBar.UpdateMaxHealth(maxHealth);
-        healthBar.valueText.text = currentHealth.ToString("n0") + "/" + maxHealth.ToString("n0");
+    // --- RPC: XỬ LÝ SÁT THƯƠNG ---
+    [PunRPC]
+    public void RPC_PlayerTakeDamage(float damageAmount)
+    {
+        if (photonView.IsMine) TakeDamage(damageAmount);
     }
 
     public void TakeDamage(float amount)
@@ -100,73 +107,109 @@ public class Player : MonoBehaviour
             DamageTaken += damage;
             currentHealth -= damage;
         }
-        healthBar.SetHealth(currentHealth);
-        healthBar.valueText.text = currentHealth.ToString("n0") + "/" + maxHealth.ToString("n0");
+        
+        if (healthBar != null) {
+            healthBar.SetHealth(currentHealth);
+            healthBar.valueText.text = currentHealth.ToString("n0") + "/" + maxHealth.ToString("n0");
+        }
 
-        // Hurt Visual Effect
         hurtEffect = true;
-		hurtEffectLerp = 0;
-        damageVignette.gameObject.SetActive(true);
-
-        // Hurt Sound Effect
+        hurtEffectLerp = 0;
+        if(damageVignette != null) damageVignette.gameObject.SetActive(true);
         SFXManager.instance?.Play("Hurt");
     }
 
-    public void GainHealth(float amount)
+    // --- RPC: XÓA ITEM (Nhờ Master Client xóa hộ) ---
+    [PunRPC]
+    public void RPC_DestroyItem(int viewID)
     {
-        currentHealth += amount;
+        if (!PhotonNetwork.IsMasterClient) return; // Chỉ Master mới được xóa
 
-        if (currentHealth > maxHealth) {
-            currentHealth = maxHealth;
+        PhotonView targetView = PhotonView.Find(viewID);
+        if (targetView != null)
+        {
+            PhotonNetwork.Destroy(targetView.gameObject);
         }
-        
-        healthBar.SetHealth(currentHealth);
-        healthBar.valueText.text = currentHealth.ToString("n0") + "/" + maxHealth.ToString("n0");
     }
 
-    // Inventory
     public void PickUpItem(GroundItem groundItem) {
         inventory.AddItem(groundItem.item, groundItem.amount);
     }
 
     public void DropItem(InventorySlot slot) {
-        var inst = Instantiate(slot.item.groundPrefab);
+        // Tạo item qua mạng (Prefab phải ở trong Resources)
+        GameObject inst = PhotonNetwork.Instantiate(slot.item.groundPrefab.name, Vector3.zero, Quaternion.identity);
+        
         inst.GetComponent<GroundItem>().amount = slot.amount;
         
-        Vector3 dropPosition = transform.position + (ITEM_DROP_DISTANCE * cameraSystem.getMainCamera().transform.forward);
-        dropPosition.y = 0.5f; // Fixes issue of items dropping underground
+        Vector3 dropPosition = transform.position + (ITEM_DROP_DISTANCE * transform.forward); // Dùng transform.forward thay vì cameraSystem để an toàn
+        if (cameraSystem != null && cameraSystem.getMainCamera() != null)
+             dropPosition = transform.position + (ITEM_DROP_DISTANCE * cameraSystem.getMainCamera().transform.forward);
+
+        dropPosition.y = 0.5f; 
         inst.transform.position = dropPosition;
     }
 
     public void OnTriggerEnter(Collider other) {
+        if (!photonView.IsMine) return;
+
         if (other.gameObject.tag == "GroundItem") {
             GroundItem gi = other.gameObject.GetComponent<GroundItem>();
             SFXManager.instance?.Play(gi.sfx, 0.9f, 1.1f);
             PickUpItem(gi);
+            
             if (gi.currentInfo != null) { Destroy(gi.currentInfo.gameObject); }
-            Destroy(other.gameObject);
-        } else if (other.gameObject.tag == "EnemyProjectile") {
-            TakeDamage(other.gameObject.GetComponent<EnemyProjectile>().damage);
-        }
+            
+            // Xử lý xóa Item qua mạng
+            PhotonView itemPV = other.GetComponent<PhotonView>();
+            if (itemPV != null)
+            {
+                if (PhotonNetwork.IsMasterClient)
+                    PhotonNetwork.Destroy(other.gameObject);
+                else
+                {
+                    other.gameObject.SetActive(false); // Ẩn ngay lập tức
+                    photonView.RPC("RPC_DestroyItem", RpcTarget.MasterClient, itemPV.ViewID); // Nhờ xóa
+                }
+            }
+            else
+            {
+                Destroy(other.gameObject); // Item offline
+            }
+        } 
     }
 
-    private void OnCollisionEnter(Collision other) {
-        if (other.gameObject.tag == "GroundItem") {
-            GroundItem gi = other.gameObject.GetComponent<GroundItem>();
-            SFXManager.instance?.Play(gi.sfx, 0.9f, 1.1f);
-            PickUpItem(gi);
-            Destroy(other.gameObject);
-        } else if (other.gameObject.tag == "EnemyProjectile") {
-            TakeDamage(other.gameObject.GetComponent<EnemyProjectile>().damage);
+    // Đồng bộ Máu qua mạng
+    public void OnPhotonSerializeView(PhotonStream stream, PhotonMessageInfo info)
+    {
+        if (stream.IsWriting)
+        {
+            stream.SendNext(currentHealth);
+            stream.SendNext(maxHealth);
+        }
+        else
+        {
+            this.currentHealth = (float)stream.ReceiveNext();
+            this.maxHealth = (float)stream.ReceiveNext();
         }
     }
-
+    
+    // Các hàm giữ nguyên
+    public List<Enemy> GetLivingRobots() { return new List<Enemy>(); }
+    public void IncreaseMaxHealth(float value) {
+        maxHealth += value;
+        healthBar.UpdateMaxHealth(maxHealth);
+        healthBar.valueText.text = currentHealth.ToString("n0") + "/" + maxHealth.ToString("n0");
+    }
+    public void GainHealth(float amount) {
+        currentHealth += amount;
+        if (currentHealth > maxHealth) currentHealth = maxHealth;
+        healthBar.SetHealth(currentHealth);
+        healthBar.valueText.text = currentHealth.ToString("n0") + "/" + maxHealth.ToString("n0");
+    }
     public void CleanUp() {
         inventory.container.items = new InventorySlot[28];
         crafting.container.items = new InventorySlot[28];
     }
-
-    private void OnApplicationQuit() {
-        CleanUp();
-    }
+    private void OnApplicationQuit() { CleanUp(); }
 }

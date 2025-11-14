@@ -2,6 +2,7 @@ using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.AI;
+using Photon.Pun; // <-- PHOTON
 
 public class FlyingEnemyMelee : Enemy
 {
@@ -35,32 +36,48 @@ public class FlyingEnemyMelee : Enemy
     float currentPlayerDist = 0;
     bool isOil;
 
+    // <-- PHOTON: Biến để lưu trữ người chơi
+    private PlayerMovement[] allPlayers;
+
     new void Start()
     {
         base.Start();
         
-        rb              = GetComponent<Rigidbody>();
-        agroRangeSqr    = agroDistance * agroDistance;
-        attackRangeSqr  = attackDistance * attackDistance;
+        rb = GetComponent<Rigidbody>();
+        agroRangeSqr = agroDistance * agroDistance;
+        attackRangeSqr = attackDistance * attackDistance;
         
-        //set navmeshagent
         navMeshAgent = GetComponentInChildren<NavMeshAgent>();
         navMeshAgent.speed = moveSpeed;
-        navMeshAgent.enabled = false;
+        
+        // <-- PHOTON: Chỉ Master Client (chủ sở hữu) mới bật NavMesh
+        navMeshAgent.enabled = photonView.IsMine; 
+        
         attackRangeOilSqr = attackDistanceOil * attackDistanceOil;
-
         bc = GetComponent<BoxCollider>();
-
-        //impassable mask
         impassableMask = LayerMask.GetMask("Impassible Terrain");
     }
 
     private void Update() {
+        // <-- PHOTON: CÂU LỆNH VÀNG
+        // Nếu tôi không phải là Master Client, DỪNG LẠI.
+        if (!photonView.IsMine)
+        {
+            return;
+        }
+
         base.Update();
         
-        //update distances
-        currentTargetDist = (target.transform.position - transform.position).sqrMagnitude;
-        currentPlayerDist = (player.transform.position - transform.position).sqrMagnitude;
+        // <-- PHOTON: Master Client phải liên tục tìm Player gần nhất
+        FindClosestPlayer();
+
+        //update distances (thêm kiểm tra null)
+        if (target != null)
+            currentTargetDist = (target.transform.position - transform.position).sqrMagnitude;
+        if (player != null)
+            currentPlayerDist = (player.transform.position - transform.position).sqrMagnitude;
+        else
+            currentPlayerDist = float.MaxValue; // Nếu không có player, coi như vô tận
 
         if (player == null && ((state == STATE.AGRO_PLAYER) || (state == STATE.ATTACKING_PLAYER))){
             state = STATE.AGRO_OIL;
@@ -72,11 +89,43 @@ public class FlyingEnemyMelee : Enemy
             case STATE.AGRO_PLAYER:         MoveTowardsPlayer(); break;
             case STATE.ATTACKING_OIL:       AttackOilDrill(); break;
             case STATE.ATTACKING_PLAYER:    AttackPlayer(); break;
-            case STATE.DEAD:                rb.useGravity = true; break;
+            case STATE.DEAD:                if (rb) rb.useGravity = true; break;
         }
 
         if (coolDown >= 0)
             coolDown -= Time.deltaTime;
+    }
+
+    // <-- PHOTON: HÀM TÌM PLAYER GẦN NHẤT
+    void FindClosestPlayer()
+    {
+        allPlayers = FindObjectsOfType<PlayerMovement>(); 
+        float closestDistance = float.MaxValue;
+        PlayerMovement closestPlayer = null;
+
+        foreach (PlayerMovement p in allPlayers)
+        {
+            if (p != null && p.enabled) // (Giả sử Player còn sống có Component 'PlayerMovement' enabled)
+            {
+                float distance = (p.transform.position - transform.position).sqrMagnitude;
+                if (distance < closestDistance)
+                {
+                    closestDistance = distance;
+                    closestPlayer = p;
+                }
+            }
+        }
+
+        if (closestPlayer != null)
+        {
+            this.player = closestPlayer; // Gán player mục tiêu
+            this.playerStats = closestPlayer.GetComponent<Player>(); // Gán stats mục tiêu
+        }
+        else
+        {
+            this.player = null;
+            this.playerStats = null;
+        }
     }
 
     void AttackPlayer(){
@@ -90,6 +139,8 @@ public class FlyingEnemyMelee : Enemy
             else if (currentPlayerDist > agroRangeSqr)
                 state = STATE.AGRO_OIL;
         }
+
+        if (player == null) return; // <-- PHOTON: Thêm kiểm tra null
 
         Vector3 lookVector = new Vector3(player.transform.position.x - transform.position.x, 0, player.transform.position.z - transform.position.z);
         transform.rotation = Quaternion.LookRotation(lookVector, Vector3.up);
@@ -128,7 +179,7 @@ public class FlyingEnemyMelee : Enemy
     }
 
     void MoveTowardsTargetNoStateCheck(){
-        Vector3 dir =  (target.transform.position - transform.position).normalized;
+        Vector3 dir = (target.transform.position - transform.position).normalized;
         RaycastHit hit;
         Physics.Raycast(transform.position, Vector3.down, out hit, 1000, groundMask);
         bool toClosetoSolid = Physics.CheckBox(transform.position + bc.center, bc.size * 2.5f, Quaternion.identity, impassableMask);
@@ -150,15 +201,19 @@ public class FlyingEnemyMelee : Enemy
         transform.rotation = Quaternion.LookRotation(lookVector, Vector3.up);
     }
 
-
     void MoveTowardsPlayer(){
         //state change
+        if (player == null) { // <-- PHOTON check
+            state = STATE.AGRO_OIL;
+            return;
+        }
+
         if (currentPlayerDist > agroRangeSqr)
             state = STATE.AGRO_OIL;
         else if (currentPlayerDist < attackRangeSqr && coolDown < 0)
             state = STATE.ATTACKING_PLAYER;
         else{
-            Vector3 dir =  (player.transform.position - transform.position).normalized;
+            Vector3 dir = (player.transform.position - transform.position).normalized;
             RaycastHit hit;
 
             Physics.Raycast(transform.position, Vector3.down, out hit, 1000, groundMask);
@@ -189,7 +244,13 @@ public class FlyingEnemyMelee : Enemy
             state = STATE.AGRO_OIL;
         }
         else if (!isOil && player != null && currentPlayerDist < attackRangeSqr){
-            playerStats.TakeDamage(attackPower);
+            // <-- PHOTON: THAY ĐỔI CÁCH GÂY SÁT THƯƠNG
+            PhotonView playerPhotonView = player.GetComponent<PhotonView>();
+            if (playerPhotonView != null)
+            {
+                // Script Player của bạn PHẢI có hàm [PunRPC] public void RPC_PlayerTakeDamage(float damage)
+                playerPhotonView.RPC("RPC_PlayerTakeDamage", playerPhotonView.Owner, attackPower);
+            }
             state = STATE.AGRO_PLAYER;
         }
 
@@ -197,8 +258,8 @@ public class FlyingEnemyMelee : Enemy
     }
 
     void Stop(){
-        rb.linearVelocity = Vector3.zero;
+        if (rb) rb.linearVelocity = Vector3.zero;
         acculmulatedSpeed = Vector3.zero;
-        navMeshAgent.speed = 0;
+        if (navMeshAgent.enabled) navMeshAgent.speed = 0;
     }
 }

@@ -1,16 +1,20 @@
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
+using Photon.Pun; // <-- PHOTON: Thêm vào
 
 public class EnemyCrawlerRangedAnimation : MonoBehaviour
 {
     [SerializeField] CrawlerEnemyRanged enemy;
-    [SerializeField] GameObject projectile;
-    [SerializeField] GameObject projectileSpawnPoint;
+    
+    // [SerializeField] GameObject projectile; // <-- PHOTON: Không cần nữa
+    // [SerializeField] GameObject projectileSpawnPoint; // <-- PHOTON: Không cần nữa
+
     [SerializeField] AudioSource SpewSFX;
     [SerializeField] AudioSource DeathSFX;
 
     Animator animator;
+    private PhotonView photonView; // <-- PHOTON: Thêm vào
 
     int state;
     bool attacking = false;
@@ -18,9 +22,11 @@ public class EnemyCrawlerRangedAnimation : MonoBehaviour
     
     void Start(){
         animator = GetComponent<Animator>();
+        photonView = enemy.GetComponent<PhotonView>(); // <-- PHOTON: Thêm vào
     }
 
     void LateUpdate() {
+        // Code animator của bạn giữ nguyên
         if (enemy.state == Enemy.STATE.DEAD || enemy.currentHealth <= 0){
             animator.SetInteger("State", 2);
 
@@ -37,23 +43,34 @@ public class EnemyCrawlerRangedAnimation : MonoBehaviour
     }
 
     public void AttackKeyFrame(){
-        var inst = Instantiate(projectile);
-        inst.transform.parent = null;
-        inst.transform.position = projectileSpawnPoint.transform.position;
+        // <-- PHOTON: SỬA LỖI
+        // Không tự Instantiate ở đây.
+        // Chỉ cần gọi hàm FireProjectile() từ script chính.
+        enemy.FireProjectile();
 
         SpewSFX.pitch = Random.Range(0.9f, 1.1f);
         SpewSFX.Play();
-
-        enemy.DealDamage(inst);
     }
 
     public void EndAttackKeyFrame(){
         attacking = false;
+        
+        // <-- PHOTON: Thêm kiểm tra
+        if (photonView.IsMine)
+        {
+            // (Bạn không đổi state ở đây, nên không cần check)
+        }
     }
 
     public void Disapear(){
         LevelManager levelManager = GameObject.FindObjectOfType<LevelManager>();
         if (levelManager != null) levelManager.EnemyKilled();
-        Destroy(enemy.gameObject);
+        
+        // <-- PHOTON: SỬA LỖI
+        // Chỉ Master Client mới có quyền hủy đối tượng
+        if (photonView != null && photonView.IsMine) 
+        {
+            PhotonNetwork.Destroy(enemy.gameObject);
+        }
     }
 }
